@@ -4,7 +4,8 @@ Global Threat Intelligence Dashboard is a centralized Threat Intelligence dashbo
 
 ### Tech used
 
-* **Frontend/Framework:** [Streamlit](https://streamlit.io/)
+* **Language:** Python
+*  **Frontend/Framework:** [Streamlit](https://streamlit.io/)
 * **AI Engine:** Google Gemini API (`google-genai` / `google-generativeai`)
 * **Data Processing:** `pandas`
 * **Styling:** Custom HTML5 / CSS3
