@@ -15,7 +15,7 @@ Global Threat Intelligence Dashboard is a centralized Threat Intelligence dashbo
 
 ### AI Setup
 
-I had used Gemini flash 3.6. The API key was in file called gemini_key.txt.
+I have used Gemini flash 3.6. The API key was in a file called gemini_key.txt.
 
 ### Run the application
 
