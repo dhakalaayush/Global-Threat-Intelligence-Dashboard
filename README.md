@@ -19,7 +19,7 @@ I have used Gemini flash 3.6. The API key was in a file called gemini_key.txt.
 
 ### Run the application
 
-(`streamlit run app.py`)
+(`streamlit run app.py`) or
 (`python -m streamlit run app.py`)
 
 ### Some considerations
