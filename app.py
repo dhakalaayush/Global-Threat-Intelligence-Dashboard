@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 import google.generativeai as genai
 import os
 
-# Page config
+# Page setup
 st.set_page_config(page_title="Global Threat Intelligence", layout="wide", initial_sidebar_state="expanded")
 
 # CSS
