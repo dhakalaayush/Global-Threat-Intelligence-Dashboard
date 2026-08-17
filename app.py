@@ -1,334 +1,320 @@
+# Since this is at intial stage, the data are hardcoded right now. Database and Node-RED are yet to be set up.
+
 import streamlit as st
 import pandas as pd
-import requests
-import datetime
+import sqlite3
+import plotly.express as px
 import plotly.graph_objects as go
-import google.generativeai as genai
 import os
 
-# Page setup
-st.set_page_config(page_title="Global Threat Intelligence", layout="wide", initial_sidebar_state="expanded")
 
-# CSS
+# STREAMLIT PAGE CONFIG & CLEAN WIREFRAME STYLING
+
+st.set_page_config(page_title="D.O.O.M. Command Matrix", layout="wide")
+
 st.markdown("""
 <style>
-    .ioc-grid { 
-        font-family: 'Courier New', monospace; font-size: 14px; 
+    /* Clean, scannable layout */
+    .stApp { background-color: #0e1117; color: #f1f5f9; }
+    h1, h2, h3, h4 { color: #f8fafc; font-weight: 600; }
+    .stTabs [data-baseweb="tab-list"] { gap: 16px; }
+    .stTabs [data-baseweb="tab"] {
+        background-color: #1e293b;
+        border-radius: 6px;
+        padding: 8px 16px;
+        color: #94a3b8;
     }
-    
-    /* Threat card style */
-    .threat-card { 
-        background: rgba(128, 128, 128, 0.05); /* Very faint gray. This is suitable for both light and dark mode */
-        border: 1px solid rgba(128, 128, 128, 0.2); 
-        border-radius: 8px; 
-        padding: 16px; 
-        margin-bottom: 12px; 
+    .stTabs [aria-selected="true"] {
+        background-color: #334155 !important;
+        color: #38bdf8 !important;
     }
-    .threat-card h4 { 
-        margin-top: 0; 
-        margin-bottom: 8px; 
-        font-size: 16px; 
+    .card {
+        background-color: #1e293b;
+        padding: 16px;
+        border-radius: 8px;
+        border: 1px solid #334155;
     }
-    .threat-date { 
-        font-size: 12px; color: #888; 
-    }
-    
-    .ai-summary { 
-        background-color: rgba(59, 130, 246, 0.1);
-        border-left: 4px solid #4a90e2; 
-        padding: 12px; 
-        margin-top: 12px; 
-        border-radius: 0 4px 4px 0; 
-    }
-    .ai-summary p { 
-        margin: 4px 0; 
-        font-size: 14px; 
-    }
-    
-    .mitre-tag { 
-        display: inline-block; 
-        background: rgba(128, 128, 128, 0.15); 
-        padding: 2px 8px; 
-        border-radius: 12px; 
-        font-size: 11px; 
-        font-weight: 600; 
-        margin-right: 6px; 
-        margin-top: 8px; 
+    .modal-box {
+        background-color: #1e293b;
+        border: 1px solid #475569;
+        border-radius: 10px;
+        padding: 20px;
     }
 </style>
-""", unsafe_allow_html=True) #This line renders the CSS
+""", unsafe_allow_html=True)
 
 
-# AI Setup
-# Gemini 3.6 flash lite was used
-def load_gemini_key(filepath="gemini_key.txt"):
-    """Loads the Gemini API key from a local text file"""
-    if os.path.exists(filepath):
-        with open(filepath, "r") as f:
-            key = f.read().strip()
-            if key:
-                return key
-    return "Error fetching the API key" # Fallback so the UI handles the missing key
+# DATABASE INGESTION & SAMPLE FALLBACK GENERATOR
 
-GEMINI_API_KEY = load_gemini_key()
+def get_database_connection():
+    db_path = "doom_matrix.db" if os.path.exists("doom_matrix.db") else "../database/doom_matrix.db"
+    return sqlite3.connect(db_path)
 
-if "ai_status" not in st.session_state:
-    st.session_state.ai_status = "Connected" if GEMINI_API_KEY != "Error fetching the API key" else "Awaiting API Key"
-
-def get_ai_summary(text):
-    """Uses Gemini to summarize threat text and extract MITRE tactics."""
-    if GEMINI_API_KEY == "Error fetching the API key":
-        st.session_state.ai_status = "Awaiting API Key"
-        return {"summary": "Gemini API key not configured. Add your key to generate AI summaries.", "tags": ["T0000: Setup Required"]}
-    
+def load_data():
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-3.6-flash')
-        prompt = f"""
-        Analyze the following cyber threat intelligence text. 
-        1. Write a 2-sentence executive summary (Threat and Impact).
-        2. Identify up to 2 relevant MITRE ATT&CK Techniques.
-        Format your response EXACTLY like this:
-        Summary: [Your 2 sentence summary]
-        Tags: [Tag 1], [Tag 2]
-        
-        Text to analyze: {text}
-        """
-        response = model.generate_content(prompt)
-        output = response.text
-        
-        summary = output.split("Summary:")[1].split("Tags:")[0].strip()
-        tags_raw = output.split("Tags:")[1].strip()
-        tags = [tag.strip() for tag in tags_raw.split(',')]
-        
-        st.session_state.ai_status = "Connected"
-        return {"summary": summary, "tags": tags}
-    except Exception as e:
-        st.session_state.ai_status = "Offline"
-        return {"summary": f"AI Engine offline: {e}", "tags": []}
-
-
-# Functions for fetching data
-@st.cache_data(ttl=3600) 
-def fetch_cisa_kev():
-    """Fetches the live CISA Known Exploited Vulnerabilities catalog."""
-    url = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
-    try:
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        data = response.json()
-        df = pd.DataFrame(data['vulnerabilities'])
-        df['dateAdded'] = pd.to_datetime(df['dateAdded'])
-        return df
-    except Exception as e:
-        st.error(f"Error fetching CISA KEV: {e}")
-        return pd.DataFrame()
-
-@st.cache_data(ttl=3600)
-def fetch_feodo_tracker():
-    """Fetches live Botnet and C2 server data from Abuse.ch."""
-    url = "https://feodotracker.abuse.ch/downloads/ipblocklist.json"
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        df = pd.DataFrame(data)
-        df['first_seen'] = pd.to_datetime(df['first_seen'])
-        return df
-    except Exception as e:
-        return pd.DataFrame(columns=['ip_address', 'status', 'country', 'first_seen', 'malware'])
-
-
-# Loading data
-kev_df = fetch_cisa_kev()
-c2_df = fetch_feodo_tracker()
-
-# Sidebar
-with st.sidebar:
-    st.markdown("## Global Threat Intelligence Dashboard")
-    st.write("")
+        conn = get_database_connection()
+        df = pd.read_sql_query("SELECT * FROM asset_vulnerabilities", conn)
+        conn.close()
+        if not df.empty:
+            return df
+    except Exception:
+        pass
     
-    time_range = st.selectbox("Time Range", options=["Last 24 hours", "Last 7 days", "Last 30 days"], index=0)
-    st.write("")
-    
-    min_severity = st.slider("Minimum Severity Score", min_value=0, max_value=10, value=7, step=1)
-    st.write("")
-    
-    st.markdown("<p style='font-size: 14px; font-weight: 500; margin-bottom: 5px;'>Data Sources</p>", unsafe_allow_html=True)
-    use_nvd = st.checkbox("NVD", value=True)
-    use_cisa = st.checkbox("CISA KEV", value=True)
-    use_ghsa = st.checkbox("Github Advisories (GHSA)", value=True)
-    use_otx = st.checkbox("AlienVault OTX", value=True)
-    
-    st.divider()
-    
-    st.markdown("<p style='font-size: 14px; font-weight: 500; margin-bottom: 5px;'>AI Engine Status</p>", unsafe_allow_html=True)
-    ai_status_placeholder = st.empty()
+    # Realistic mock dataset matching wireframe assets if DB is fresh/empty
+    mock_data = [
+        {"doombot_id": "doombot1", "machine_name": "Latveria-DC01", "ip_address": "192.168.1.10", "os": "Windows", "mac": "00:1A:2B:3C:4D:5E", "status": "active", "package_name": "OpenSSL", "package_version": "1.1.1", "cve_id": "CVE-2022-0778", "cvss_score": 7.5, "epss_score": 0.12, "vpr_score": 6.8, "affected_asset": "Operating System", "mitre_technique": "T1190 - Exploit Public-Facing App", "boris_description": "OpenSSL BN_mod_sqrt infinite loop vulnerability allowing DoS on domain controller.", "boris_mitigation": "Update OpenSSL to version 1.1.1n or newer via Windows update catalog."},
+        {"doombot_id": "doombot1", "machine_name": "Latveria-DC01", "ip_address": "192.168.1.10", "os": "Windows", "mac": "00:1A:2B:3C:4D:5E", "status": "active", "package_name": "SMBv1 Service", "package_version": "1.0", "cve_id": "CVE-2017-0144", "cvss_score": 8.1, "epss_score": 0.45, "vpr_score": 8.5, "affected_asset": "Network", "mitre_technique": "T1210 - Exploitation of Remote Services", "boris_description": "SMBv1 remote code execution exposure detected on DC01.", "boris_mitigation": "Disable SMBv1 protocol globally via PowerShell: Set-SmbServerConfiguration -EnableSMB1Protocol $false."},
+        {"doombot_id": "doombot2", "machine_name": "Web-Prod-Node", "ip_address": "192.168.1.25", "os": "Linux", "mac": "00:1A:2B:3C:4D:5F", "status": "inactive", "package_name": "Apache HTTPD", "package_version": "2.4.49", "cve_id": "CVE-2021-41773", "cvss_score": 9.8, "epss_score": 0.88, "vpr_score": 9.4, "affected_asset": "Application", "mitre_technique": "T1059 - Command and Scripting Interpreter", "boris_description": "Path traversal and remote code execution flaw in Apache 2.4.49 path normalization.", "boris_mitigation": "Upgrade Apache package immediately: apt-get update && apt-get install --only-upgrade apache2."},
+        {"doombot_id": "doombot2", "machine_name": "Web-Prod-Node", "ip_address": "192.168.1.25", "os": "Linux", "mac": "00:1A:2B:3C:4D:5F", "status": "inactive", "package_name": "OpenSSH", "package_version": "8.2p1", "cve_id": "CVE-2024-6387", "cvss_score": 8.1, "epss_score": 0.35, "vpr_score": 7.9, "affected_asset": "Configuration", "mitre_technique": "T1078 - Valid Accounts", "boris_description": "RegreSSHion signal handler race condition in OpenSSH server on Linux.", "boris_mitigation": "Update openssh-server package and set LoginGraceTime to 0 in /etc/ssh/sshd_config as interim workaround."},
+        {"doombot_id": "doombot3", "machine_name": "Dev-Workstation-03", "ip_address": "192.168.1.45", "os": "Windows", "mac": "00:1A:2B:3C:4D:5G", "status": "inactive", "package_name": "Google Chrome", "package_version": "114.0.5735", "cve_id": "CVE-2023-3079", "cvss_score": 8.8, "epss_score": 0.22, "vpr_score": 7.1, "affected_asset": "Application", "mitre_technique": "T1203 - Exploitation for Client Execution", "boris_description": "Type confusion in V8 JavaScript engine allowing sandbox escape.", "boris_mitigation": "Deploy enterprise Chrome MSI package version 114.0.5735.199 or newer."}
+    ]
+    return pd.DataFrame(mock_data)
 
-# Header row
-st.markdown("<h1 style='font-weight: 300; margin-bottom: 0px;'>Global Threat Intelligence</h1>", unsafe_allow_html=True)
+df = load_data()
 
-header_col1, header_col2 = st.columns([3, 1])
-with header_col2:
-    now = datetime.datetime.now()
-    st.markdown(f"""
-        <div style='text-align: right; line-height: 1.2;'>
-            <span style='font-size: 20px; font-weight: 300;'>{now.strftime("%H:%M")}</span><br>
-            <span style='font-size: 14px; color: #666;'>{now.strftime("%Y-%m-%d")}</span><br>
-            <span style='font-size: 14px; color: #666;'>Dashboard Live</span>
-        </div>
-    """, unsafe_allow_html=True)
-st.write("")
-st.write("")
+def get_severity(cvss):
+    if cvss >= 9.0: return "high"
+    elif cvss >= 7.0: return "high"
+    elif cvss >= 4.0: return "medium"
+    return "low"
 
-# Metrics row
-col1, col2, col3 = st.columns(3)
+df["severity"] = df["cvss_score"].apply(get_severity)
 
-# 1. Total Attacks Metric
-with col1:
-    st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True) 
-    if not c2_df.empty:
-        online_threats = c2_df[c2_df['status'] == 'online']
-        total_active = len(online_threats)
+
+# POPUP MODAL: BORIS AI INTELLIGENCE
+
+@st.dialog("Boris Vulnerability Assessment")
+def boris_assessment_modal(record):
+    st.markdown(f"### {record['package_name']}")
+    st.markdown(f"`{record['cve_id']}`")
+    
+    st.markdown("#### **Boris Description**")
+    st.info(f"🤖 {record['boris_description']}")
+    
+    col_cvss, col_epss, col_vpr = st.columns(3)
+    with col_cvss:
+        st.metric("CVSS Score", f"{record['cvss_score']}")
+    with col_epss:
+        st.metric("EPSS Score", f"{int(record['epss_score'] * 100)}%")
+    with col_vpr:
+        st.metric("VPR Score", f"{record['vpr_score']}")
+    
+    st.markdown("#### **Boris Mitigation**")
+    st.success(f"🛡️ {record['boris_mitigation']}")
+    
+    if st.button("Acknowledge & Close", use_container_width=True):
+        st.rerun()
+
+
+# TAB NAVIGATION MATCHING WIREFRAME VIEWS
+
+tab_fleet, tab_drilldown, tab_risk = st.tabs([
+    "🖥️ Doombot Fleet Overview", 
+    "🔍 Machine Threat Matrix", 
+    "📋 Boris Risk Table"
+])
+
+
+# FLEET OVERVIEW
+
+with tab_fleet:
+    logo_col, space_col = st.columns([1, 6])
+    with logo_col:
+        if os.path.exists("Logo.png"):
+            st.image("Logo.png", width=110)
+        else:
+            st.markdown("```\n[  LOGO  ]\n[ D.O.O.M]\n```")
+            
+    st.subheader("Doombot Assets")
+    
+    col_table, col_status_donut = st.columns([3, 1])
+    
+    assets_summary = df.groupby(["doombot_id", "machine_name", "os", "mac", "status"]).size().reset_index(name="total_vulns")
+    
+    top_vulns = []
+    for _, row in assets_summary.iterrows():
+        machine_df = df[df["machine_name"] == row["machine_name"]]
+        high_count = len(machine_df[machine_df["severity"] == "high"])
+        med_count = len(machine_df[machine_df["severity"] == "medium"])
+        if high_count > 0:
+            top_vulns.append(f"{high_count} High")
+        elif med_count > 0:
+            top_vulns.append(f"{med_count} Medium")
+        else:
+            top_vulns.append("None")
+    assets_summary["Top Vulnerability"] = top_vulns
+
+    with col_table:
+        display_assets = assets_summary[["doombot_id", "machine_name", "os", "mac", "Top Vulnerability", "status"]]
+        display_assets.columns = ["Doombot", "Machine Name", "OS", "MAC Address", "Top Alert", "Status"]
+        st.dataframe(display_assets, use_container_width=True, hide_index=True)
+
+    with col_status_donut:
+        status_counts = assets_summary["status"].value_counts().reset_index()
+        status_counts.columns = ["Status", "Count"]
         
-        now_utc = datetime.datetime.utcnow()
-        yesterday = now_utc - datetime.timedelta(days=1)
-        two_days_ago = now_utc - datetime.timedelta(days=2)
-        added_today = len(online_threats[online_threats['first_seen'] >= yesterday])
-        added_yesterday = len(online_threats[(online_threats['first_seen'] >= two_days_ago) & (online_threats['first_seen'] < yesterday)])
-        delta = added_today - added_yesterday
-
-        st.metric(label="Today's attacks (Live C2 Servers)", value=f"{total_active:,}", delta=delta, delta_color="inverse")
-    else:
-        st.metric(label="Today's attacks", value="0", delta="0", delta_color="inverse")
-
-# 2. Top Countries Bar Chart
-with col2:
-    st.markdown("<p style='font-size: 14px; text-align: center; margin-bottom: 10px;'>Top Attacks by countries</p>", unsafe_allow_html=True)
-    if not c2_df.empty:
-        top_countries = c2_df[c2_df['status'] == 'online']['country'].value_counts().head(3)
-        max_count = top_countries.max()
-
-        html = '<div style="display: flex; flex-direction: column; gap: 10px; max-width: 200px; margin: 0 auto;">'
-        for country_code, count in top_countries.items():
-            width_pct = int((count / max_count) * 100)
-            html += f"""
-            <div style="display: flex; align-items: center; gap: 10px;">
-                <span style="width: 30px; font-size: 14px; font-weight: 500;">{country_code}</span>
-                <div style="flex-grow: 1; background: rgba(128, 128, 128, 0.2); height: 6px; border-radius: 3px;">
-                    <div style="width: {width_pct}%; background: #4a90e2; height: 100%; border-radius: 3px;"></div>
-                </div>
-            </div>
-            """
-        html += '</div>'
-        st.markdown(html, unsafe_allow_html=True)
-
-# 3. Donut Chart
-with col3:
-    if not c2_df.empty:
-        top_malware = c2_df[c2_df['status'] == 'online']['malware'].value_counts().head(3)
-        labels = top_malware.index.tolist()
-        values = top_malware.values.tolist()
-        
-        fig = go.Figure(data=[go.Pie(
-            labels=labels, values=values, hole=0.6,
-            marker=dict(colors=['#27272a', '#52525b', '#a1a1aa']),
-            textinfo='none'
-        )])
-        fig.update_layout(
-            margin=dict(t=0, b=0, l=0, r=0), height=140, showlegend=True,
-            legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5, font=dict(size=11))
+        fig_active = px.pie(
+            status_counts, 
+            names="Status", 
+            values="Count", 
+            hole=0.6,
+            color="Status",
+            color_discrete_map={"active": "#475569", "inactive": "#94a3b8"}
         )
-        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+        fig_active.update_layout(
+            margin=dict(t=10, b=10, l=10, r=10),
+            height=180,
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#cbd5e1"),
+            legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=1.0)
+        )
+        st.plotly_chart(fig_active, use_container_width=True)
 
-st.divider()
-
-# Tabs
-tab1, tab2, tab3 = st.tabs(["News Feed & AI", "Vulnerabilities (CISA KEV)", "Indicators of Compromise (Abuse.ch)"])
-
-# Tab 1: News feed
-with tab1:
-    st.markdown("### Latest High-Profile Vulnerabilities")
+    st.write("")
+    st.write("")
     
-    if not kev_df.empty:
-        top_news = kev_df.sort_values(by='dateAdded', ascending=False).head(2)
-        
-        for index, row in top_news.iterrows():
-            with st.spinner("AI is analyzing this threat..."):
-                ai_data = get_ai_summary(row['shortDescription'])
+    distinct_machines = df["machine_name"].unique()
+    
+    if len(distinct_machines) > 0:
+        donut_cols = st.columns(len(distinct_machines))
+        for i, machine in enumerate(distinct_machines):
+            with donut_cols[i]:
+                sub_df = df[df["machine_name"] == machine]
+                sev_counts = sub_df["severity"].value_counts().reindex(["high", "medium", "low"], fill_value=0).reset_index()
+                sev_counts.columns = ["Severity", "Count"]
                 
-            tags_html = "".join([f"<span class='mitre-tag'>{tag}</span>" for tag in ai_data['tags']])
-            date_str = row['dateAdded'].strftime('%Y-%m-%d')
-            
-            card_html = f"""
-            <div class='threat-card'>
-                <h4>{row['vendorProject']} {row['product']} Vulnerability ({row['cveID']})</h4>
-                <span class='threat-date'>Added to KEV: {date_str} | Action Due: {row['dueDate']}</span>
-                <p>{row['shortDescription']}</p>
-                <div class='ai-summary'>
-                    <strong>✨ AI Analysis</strong>
-                    <p>{ai_data['summary']}</p>
-                    <div>{tags_html}</div>
-                </div>
-            </div>
-            """
-            
-            st.markdown(card_html, unsafe_allow_html=True)
-            
-# Tab 2: Vulnerabilities
-with tab2:
-    if not kev_df.empty and use_cisa:
-        st.markdown(f"*(Showing latest entries from the live CISA KEV database)*")
-        display_df = kev_df.sort_values(by='dateAdded', ascending=False).head(15)
-        display_df = display_df[['cveID', 'vendorProject', 'product', 'shortDescription', 'dateAdded']]
-        display_df.columns = ['CVE ID', 'Vendor', 'Product', 'Description', 'Date Added']
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-    else:
-        st.write("Data source not selected or unavailable.")
+                fig_sev = px.pie(
+                    sev_counts, 
+                    names="Severity", 
+                    values="Count", 
+                    hole=0.6,
+                    color="Severity",
+                    color_discrete_map={"high": "#334155", "medium": "#64748b", "low": "#cbd5e1"}
+                )
+                fig_sev.update_layout(
+                    margin=dict(t=5, b=5, l=5, r=5),
+                    height=180,
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#cbd5e1"),
+                    showlegend=(i == len(distinct_machines) - 1)
+                )
+                st.plotly_chart(fig_sev, use_container_width=True, key=f"donut_{machine}_{i}")
+                st.markdown(f"<p style='text-align: center; font-weight: 600; color: #94a3b8;'>{machine}</p>", unsafe_allow_html=True)
 
-# Tab 3: IoC
-with tab3:
-    st.markdown("### Live Command & Control IPs")
-    st.write("These indicators represent active, online botnet infrastructure sourced from Abuse.ch.")
-    
-    if not c2_df.empty:
-        ioc_df = c2_df[c2_df['status'] == 'online'][['ip_address', 'port', 'malware', 'first_seen']].copy()
-        ioc_df.columns = ['IP Address', 'Port', 'Malware Family', 'First Seen']
+
+# THREAT MATRIX
+
+with tab_drilldown:
+    if len(df) > 0:
+        selected_machine = st.selectbox(
+            "Select Host:", 
+            options=df["machine_name"].unique(),
+            label_visibility="collapsed"
+        )
         
-        # Display as an interactive dataframe allowing for easy search
-        st.dataframe(ioc_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("No active IoCs available at this time.")
+        selected_df = df[df["machine_name"] == selected_machine].reset_index(drop=True)
+        
+        top_left_col, top_right_col = st.columns([3, 2])
+        
+        with top_left_col:
+            st.subheader("Vulnerability Findings")
+            for idx, row in selected_df.iterrows():
+                r_col1, r_col2, r_col3, r_col4 = st.columns([2, 2, 4, 1.5])
+                r_col1.write(f"**{row['package_name']}**")
+                r_col2.write(f"`{row['cve_id']}`")
+                r_col3.caption(f"{row['boris_description'][:65]}...")
+                if r_col4.button("••• Details", key=f"btn_modal_{idx}"):
+                    boris_assessment_modal(row)
+                st.markdown("<hr style='margin: 4px 0; border-color: #334155;'/>", unsafe_allow_html=True)
+                
+        with top_right_col:
+            categories = ['Operating System', 'Application', 'Network', 'Configuration', 'Others']
+            asset_counts = selected_df['affected_asset'].value_counts().to_dict()
+            r_values = [asset_counts.get(cat, 0) + 1 for cat in categories]
+            
+            radar_fig = go.Figure(data=go.Scatterpolar(
+                r=r_values,
+                theta=categories,
+                fill='toself',
+                fillcolor='rgba(148, 163, 184, 0.4)',
+                line=dict(color='#94a3b8', width=2),
+                marker=dict(size=6, color='#cbd5e1')
+            ))
+            
+            radar_fig.update_layout(
+                polar=dict(
+                    radialaxis=dict(visible=True, showticklabels=False, linecolor="#475569"),
+                    angularaxis=dict(linecolor="#475569", color="#cbd5e1")
+                ),
+                showlegend=False,
+                height=280,
+                margin=dict(t=30, b=30, l=40, r=40),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)"
+            )
+            st.plotly_chart(radar_fig, use_container_width=True)
 
-# Render AI status
-with ai_status_placeholder:
-    if st.session_state.ai_status == "Connected":
-        status_html = """
-        <div style="display: flex; align-items: center; gap: 8px;">
-            <div style="position: relative; display: flex; width: 10px; height: 10px;">
-              <span style="position: absolute; display: inline-flex; height: 100%; width: 100%; border-radius: 50%; background-color: #4ade80; opacity: 0.75; animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;"></span>
-              <span style="position: relative; display: inline-flex; border-radius: 50%; height: 10px; width: 10px; background-color: #22c55e;"></span>
-            </div>
-            <span style="font-size: 13px; color: #4aff4d;">Connected</span>
-        </div>
-        <style>@keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .5; transform: scale(1.5); } }</style>
-        """
-    elif st.session_state.ai_status == "Offline":
-        status_html = """
-        <div style="display: flex; align-items: center; gap: 8px;">
-            <div style="position: relative; display: flex; width: 10px; height: 10px;">
-              <span style="position: relative; display: inline-flex; border-radius: 50%; height: 10px; width: 10px; background-color: #ef4444;"></span>
-            </div>
-            <span style="font-size: 13px; color: #ef4444; font-weight: 500;">Disconnected</span>
-        </div>
-        """
-    else:
-         status_html = """
-        <div style="display: flex; align-items: center; gap: 8px;">
-            <div style="position: relative; display: flex; width: 10px; height: 10px;">
-              <span style="position: relative; display: inline-flex; border-radius: 50%; height: 10px; width: 10px; background-color: #facc15;"></span>
-            </div>
-            <span style="font-size: 13px; color: #ffffff;">Connecting</span>
-        </div>
-        """
-    st.markdown(status_html, unsafe_allow_html=True)
+        st.divider()
+
+        bottom_left_col, bottom_right_col = st.columns([1, 1])
+        
+        with bottom_left_col:
+            st.subheader("Vulnerabilities Count")
+            vuln_per_machine = df.groupby("machine_name").size().reset_index(name="Count").sort_values(by="Count", ascending=False)
+            
+            bar_fig = px.bar(
+                vuln_per_machine, 
+                x="machine_name", 
+                y="Count", 
+                color_discrete_sequence=["#94a3b8"]
+            )
+            bar_fig.update_layout(
+                margin=dict(t=10, b=20, l=10, r=10),
+                height=250,
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#cbd5e1"),
+                xaxis=dict(title="", showgrid=False),
+                yaxis=dict(title="", showgrid=True, gridcolor="#334155")
+            )
+            st.plotly_chart(bar_fig, use_container_width=True)
+            
+        with bottom_right_col:
+            st.subheader("MITRE ATT&CK")
+            mitre_counts = df["mitre_technique"].value_counts().reset_index()
+            mitre_counts.columns = ["Technique", "Count"]
+            
+            hbar_fig = px.bar(
+                mitre_counts, 
+                x="Count", 
+                y="Technique", 
+                orientation='h', 
+                color_discrete_sequence=["#94a3b8"]
+            )
+            hbar_fig.update_layout(
+                margin=dict(t=10, b=20, l=10, r=10),
+                height=250,
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#cbd5e1"),
+                xaxis=dict(title="", showgrid=True, gridcolor="#334155"),
+                yaxis=dict(title="", showgrid=False, autorange="reversed")
+            )
+            st.plotly_chart(hbar_fig, use_container_width=True)
+
+
+# RISK TABLE
+
+with tab_risk:
+    st.subheader("Boris Risk Table")
+    if len(df) > 0:
+        risk_table = df[["cve_id", "package_name", "machine_name", "affected_asset", "cvss_score"]].copy()
+        risk_table.columns = ["Risk ID", "Risk", "Machine", "Affected Assets", "Risk Score"]
+        
+        risk_table["Priority"] = risk_table["Risk Score"].apply(
+            lambda s: "Critical" if s >= 9.0 else ("High" if s >= 7.0 else "Medium")
+        )
+        
+        st.dataframe(risk_table, use_container_width=True, hide_index=True)
