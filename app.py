@@ -266,7 +266,7 @@ with tab1:
                 <span class='threat-date'>Added to KEV: {date_str} | Action Due: {row['dueDate']}</span>
                 <p>{row['shortDescription']}</p>
                 <div class='ai-summary'>
-                    <strong>✨ AI Analysis</strong>
+                    <strong>AI Analysis</strong>
                     <p>{ai_data['summary']}</p>
                     <div>{tags_html}</div>
                 </div>
